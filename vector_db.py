@@ -76,16 +76,28 @@ def upsert_chunks(user_id: str, filename: str, chunks: list):
 def search_chunks(user_id: str, query: str, top_k: int = 5) -> str:
     """Semantic search chunk dokumen user."""
     query_vec = embed([query])[0].tolist()
-
-    results = qdrant.search(
-        collection_name=COLLECTION_NAME,
-        query_vector=query_vec,
-        query_filter=Filter(
-            must=[FieldCondition(key="user_id", match=MatchValue(value=user_id))]
-        ),
-        limit=top_k,
-        with_payload=True,
+    query_filter = Filter(
+        must=[FieldCondition(key="user_id", match=MatchValue(value=user_id))]
     )
+
+    if hasattr(qdrant, "search"):
+        results = qdrant.search(
+            collection_name=COLLECTION_NAME,
+            query_vector=query_vec,
+            query_filter=query_filter,
+            limit=top_k,
+            with_payload=True,
+        )
+    else:
+        # Untuk qdrant-client versi terbaru yang sudah tidak mensupport .search()
+        resp = qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            query=query_vec,
+            query_filter=query_filter,
+            limit=top_k,
+            with_payload=True,
+        )
+        results = resp.points
 
     if not results:
         return ""
