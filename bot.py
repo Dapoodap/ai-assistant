@@ -1,5 +1,5 @@
 import os
-import requests
+import httpx
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
@@ -12,22 +12,35 @@ from telegram.ext import (
 
 load_dotenv()
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
+TOKEN   = os.getenv("TELEGRAM_TOKEN")
 API_URL = os.getenv("API_URL", "http://localhost:8000")
+
+SUPPORTED_EXTS = {".txt", ".md", ".py", ".js", ".ts", ".json",
+                  ".csv", ".html", ".css", ".xml", ".pdf"}
+
+MODE_LABEL = {
+    "chat":        "💬",
+    "code_review": "🔍",
+    "web_search":  "🌐",
+    "doc_query":   "📄",
+    "doc_edit":    "✏️",
+    "error":       "❌",
+}
 
 # ───────────────────────────────────────────
 # HELPERS
 # ───────────────────────────────────────────
 
-def call_chat(user_id: str, message: str) -> dict:
+async def call_chat(user_id: str, message: str, username: str = None) -> dict:
     try:
-        r = requests.post(
-            f"{API_URL}/chat",
-            json={"user_id": user_id, "message": message},
-            timeout=45,
-        )
-        return r.json()
-    except requests.exceptions.Timeout:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            r = await client.post(
+                f"{API_URL}/chat",
+                json={"user_id": user_id, "message": message, "username": username},
+            )
+            r.raise_for_status()
+            return r.json()
+    except httpx.TimeoutException:
         return {"reply": "⏱️ Timeout nih, coba lagi ya.", "mode": "error"}
     except Exception as e:
         return {"reply": f"❌ Error: {e}", "mode": "error"}
@@ -39,21 +52,11 @@ async def send_long(update: Update, text: str):
         except Exception:
             await update.message.reply_text(text)
         return
-    chunks = [text[i:i+4096] for i in range(0, len(text), 4096)]
-    for chunk in chunks:
+    for chunk in [text[i:i+4096] for i in range(0, len(text), 4096)]:
         try:
             await update.message.reply_text(chunk, parse_mode="Markdown")
         except Exception:
             await update.message.reply_text(chunk)
-
-MODE_LABEL = {
-    "chat": "💬",
-    "code_review": "🔍",
-    "web_search": "🌐",
-    "doc_query": "📄",
-    "doc_edit": "✏️",
-    "error": "❌",
-}
 
 # ───────────────────────────────────────────
 # COMMANDS
@@ -67,18 +70,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔍 Review & debug kode\n"
         "🌐 Cari info terbaru dari internet\n"
         "📄 Baca & analisis dokumen\n"
-        "✏️ Edit / recreate dokumen\n\n"
+        "✏️ Edit dokumen\n\n"
         "*Commands:*\n"
         "/reset — hapus history chat\n"
-        "/docs — lihat dokumen yang tersimpan\n\n"
-        "Kirim file (.txt .py .md .js dll) langsung di sini buat upload dokumen.\n\nGas!",
+        "/docs — lihat dokumen tersimpan\n\n"
+        "Kirim file langsung buat upload dokumen 📎\n\nGas!",
         parse_mode="Markdown",
     )
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     try:
-        requests.delete(f"{API_URL}/memory/{user_id}", timeout=10)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.delete(f"{API_URL}/memory/{user_id}")
+            r.raise_for_status()
         await update.message.reply_text("✅ Memory di-reset. Fresh start!")
     except Exception:
         await update.message.reply_text("❌ Gagal reset, coba lagi.")
@@ -86,14 +91,19 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def list_docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     try:
-        r = requests.get(f"{API_URL}/docs/{user_id}", timeout=10)
-        docs = r.json()
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{API_URL}/docs/{user_id}")
+            r.raise_for_status()
+            docs = r.json()
+            
         if not docs:
             await update.message.reply_text("📭 Belum ada dokumen tersimpan.")
             return
         lines = ["📚 *Dokumen tersimpan:*\n"]
-        for fname, info in docs.items():
-            lines.append(f"• `{fname}` — {info['lines']} baris, {info['chunks']} chunk")
+        for d in docs:
+            lines.append(
+                f"• `{d['filename']}` — {d['total_lines']} baris · {d['total_chunks']} chunk"
+            )
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
@@ -103,51 +113,52 @@ async def list_docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ───────────────────────────────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    text = update.message.text
+    user_id  = str(update.effective_user.id)
+    username = update.effective_user.username or update.effective_user.first_name
+    text     = update.message.text
 
     await update.message.chat.send_action("typing")
 
-    result = call_chat(user_id, text)
-    reply = result.get("reply", "❌ Tidak ada respon.")
-    mode = result.get("mode", "chat")
+    result = await call_chat(user_id, text, username)
+    reply  = result.get("reply", "❌ Tidak ada respon.")
+    mode   = result.get("mode", "chat")
 
-    emoji = MODE_LABEL.get(mode, "💬")
-    full_reply = f"{reply}\n\n{emoji}"
-    await send_long(update, full_reply)
+    await send_long(update, f"{reply}\n\n{MODE_LABEL.get(mode, '💬')}")
 
 # ───────────────────────────────────────────
-# UPLOAD FILE / DOKUMEN
+# UPLOAD FILE
 # ───────────────────────────────────────────
-
-SUPPORTED_EXTS = {".txt", ".md", ".py", ".js", ".ts", ".json", ".csv", ".html", ".css", ".xml", ".pdf"}
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    doc = update.message.document
-
+    user_id  = str(update.effective_user.id)
+    doc      = update.message.document
     filename = doc.file_name or "file.txt"
-    ext = os.path.splitext(filename)[1].lower()
+    ext      = os.path.splitext(filename)[1].lower()
 
     if ext not in SUPPORTED_EXTS:
         await update.message.reply_text(
-            f"❌ Format `{ext}` belum didukung.\nYang bisa: {', '.join(sorted(SUPPORTED_EXTS))}",
+            f"❌ Format `{ext}` belum didukung.\n"
+            f"Yang bisa: {', '.join(sorted(SUPPORTED_EXTS))}",
             parse_mode="Markdown",
         )
         return
 
+    await update.message.reply_text("⏳ Lagi proses file lo, tunggu sebentar...")
     await update.message.chat.send_action("upload_document")
 
     try:
-        file = await context.bot.get_file(doc.file_id)
+        file       = await context.bot.get_file(doc.file_id)
         file_bytes = await file.download_as_bytearray()
+        mime       = "application/pdf" if ext == ".pdf" else "text/plain"
 
-        r = requests.post(
-            f"{API_URL}/upload/{user_id}",
-            files={"file": (filename, bytes(file_bytes), "application/pdf" if ext == ".pdf" else "text/plain")},
-            timeout=30,
-        )
-        result = r.json()
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            files = {"file": (filename, bytes(file_bytes), mime)}
+            r = await client.post(
+                f"{API_URL}/upload/{user_id}",
+                files=files
+            )
+            r.raise_for_status()
+            result = r.json()
 
         if "error" in result:
             await update.message.reply_text(f"❌ {result['error']}")
@@ -156,7 +167,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ *{filename}* berhasil diupload!\n"
             f"📊 {result['lines']} baris · {result['chunks']} chunk\n\n"
-            f"Sekarang lo bisa tanya tentang isinya, atau minta aku edit/recreate.",
+            f"Sekarang tanya aja tentang isinya!",
             parse_mode="Markdown",
         )
     except Exception as e:
