@@ -21,21 +21,42 @@ def close_db_pool():
 def get_db_cursor(commit=False):
     """
     Context manager to easily get a connection and a cursor from the pool.
-    Usage:
-        with get_db_cursor(commit=True) as cur:
-            cur.execute(...)
+    Includes pinging to avoid 'connection already closed' errors from serverless DBs.
     """
-    conn = pool.getconn()
+    conn = None
+    retries = 3
+    while retries > 0:
+        conn = pool.getconn()
+        if conn.closed:
+            pool.putconn(conn, close=True)
+            conn = None
+            retries -= 1
+            continue
+            
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            break
+        except (psycopg2.InterfaceError, psycopg2.OperationalError):
+            pool.putconn(conn, close=True)
+            conn = None
+            retries -= 1
+            
+    if not conn:
+        raise Exception("Gagal mendapatkan koneksi database yang valid setelah beberapa percobaan.")
+
     try:
         with conn.cursor() as cur:
             yield cur
         if commit:
             conn.commit()
     except Exception as e:
-        conn.rollback()
+        if not conn.closed:
+            conn.rollback()
         raise e
     finally:
-        pool.putconn(conn)
+        # If connection died during transaction, close it properly in the pool
+        pool.putconn(conn, close=(conn.closed != 0))
 
 
 def init_postgres():
