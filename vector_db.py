@@ -25,6 +25,19 @@ def init_vector_db():
             print(f"✅ Qdrant collection '{COLLECTION_NAME}' dibuat")
         else:
             print(f"✅ Qdrant collection '{COLLECTION_NAME}' sudah ada")
+        
+        # Buat index untuk field metadata (idempotent, tidak apa-apa dipanggil ulang)
+        # Menghindari error "Bad request: Index required but not found for user_id"
+        qdrant.create_payload_index(
+            collection_name=COLLECTION_NAME,
+            field_name="user_id",
+            field_schema="keyword"
+        )
+        qdrant.create_payload_index(
+            collection_name=COLLECTION_NAME,
+            field_name="filename",
+            field_schema="keyword"
+        )
 
 def embed(texts: list) -> list:
     """Generate embedding untuk list of texts."""
