@@ -3,3 +3,8 @@ requests
 python-dotenv
 uvicorn
 fastapi
+pydantic
+duckduckgo-search>=6.0
+python-multipart
+ddgs
+pymupdf
